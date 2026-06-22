@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_oldnames.h>
@@ -132,22 +133,29 @@ std::string_view fragmentShaderSource{R"GLSL(
   #version 460 core
 
   out vec4 fragColor;
+  uniform vec3 uColor;
 
   void main(){
-    fragColor = vec4(1);
+    fragColor = vec4(uColor, 1);
   }
 
 )GLSL"};
 
+struct SortingState {
+  bool isDone{false};
+  bool wasSwap{false};
+  glm::uvec2 swappedIndices{0, 0};
+};
+
 class VisualizerRenderer {
 public:
   VisualizerRenderer() {
-
     glGenVertexArrays(1, &vertexArray_);
     glGenBuffers(1, &vertexBuffer_);
 
     glBindVertexArray(vertexArray_);
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
+
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2),
                           (void *)0);
     glEnableVertexAttribArray(0);
@@ -155,10 +163,11 @@ public:
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    shaderProgram_ = createProgram();
+    createProgram();
 
-    uniformViewportLocation = glGetUniformLocation(shaderProgram_, "uViewport");
-    uniformModelLocation = glGetUniformLocation(shaderProgram_, "uModel");
+    uniformViewportLocation_ =
+        glGetUniformLocation(shaderProgram_, "uViewport");
+    uniformColorLocation_ = glGetUniformLocation(shaderProgram_, "uColor");
   }
 
   ~VisualizerRenderer() {
@@ -177,8 +186,8 @@ public:
 
   template <typename TNumber>
   void renderDiagram(const std::vector<TNumber> &data,
-                     const glm::ivec2 windowSize) {
-
+                     const glm::ivec2 windowSize,
+                     const SortingState &sortingState) {
     if (data.empty())
       return;
 
@@ -191,10 +200,19 @@ public:
     const float scale{windowSize.y / static_cast<float>(maxValue)};
 
     for (size_t i{0}; i < N; i++) {
+      float value = data[i];
+
+      if (sortingState.wasSwap) {
+        if (i == sortingState.swappedIndices.x)
+          value = data[sortingState.swappedIndices.y];
+        else if (i == sortingState.swappedIndices.y)
+          value = data[sortingState.swappedIndices.x];
+      }
+
       const float x{i * barWidth};
-      const float barHeight{data[i] * scale};
+      const float barHeight{value * scale};
       const float bottom{static_cast<float>(windowSize.y)};
-      const float y = {bottom - barHeight};
+      const float y{bottom - barHeight};
 
       const size_t baseIndex{i * 6};
       vertexData[baseIndex] = glm::vec2(x, bottom);
@@ -206,9 +224,15 @@ public:
       vertexData[baseIndex + 5] = glm::vec2(x, y);
     }
 
+    glm::vec3 color(1);
+    if (sortingState.isDone)
+      color = {0, 1, 0};
+
     glUseProgram(shaderProgram_);
-    glUniform2f(uniformViewportLocation, static_cast<float>(windowSize.x),
+    glUniform2f(uniformViewportLocation_, static_cast<float>(windowSize.x),
                 static_cast<float>(windowSize.y));
+
+    glUniform3f(uniformColorLocation_, color.r, color.g, color.b);
 
     glBindVertexArray(vertexArray_);
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
@@ -218,6 +242,40 @@ public:
 
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertexData.size()));
 
+    if (sortingState.wasSwap) {
+      const float bottom{static_cast<float>(windowSize.y)};
+      float x{sortingState.swappedIndices.x * barWidth};
+      float barHeight{data[sortingState.swappedIndices.y] * scale};
+      float y{bottom - barHeight};
+
+      vertexData[0] = glm::vec2(x, bottom);
+      vertexData[1] = glm::vec2(x + barWidth, bottom);
+      vertexData[2] = glm::vec2(x + barWidth, y);
+
+      vertexData[3] = glm::vec2(x, bottom);
+      vertexData[4] = glm::vec2(x + barWidth, y);
+      vertexData[5] = glm::vec2(x, y);
+
+      x = sortingState.swappedIndices.y * barWidth;
+      barHeight = data[sortingState.swappedIndices.x] * scale;
+      y = bottom - barHeight;
+
+      vertexData[6] = glm::vec2(x, bottom);
+      vertexData[7] = glm::vec2(x + barWidth, bottom);
+      vertexData[8] = glm::vec2(x + barWidth, y);
+
+      vertexData[9] = glm::vec2(x, bottom);
+      vertexData[10] = glm::vec2(x + barWidth, y);
+      vertexData[11] = glm::vec2(x, y);
+
+      color = {1, 0, 0};
+      glUniform3f(uniformColorLocation_, color.r, color.g, color.b);
+
+      glBufferData(GL_ARRAY_BUFFER, 12 * sizeof(glm::vec2), vertexData.data(),
+                   GL_DYNAMIC_DRAW);
+      glDrawArrays(GL_TRIANGLES, 0, 12);
+    }
+
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
@@ -225,22 +283,20 @@ public:
   }
 
 private:
-  GLuint createProgram() const {
+  void createProgram() {
     GLuint vertexShader{
         compileShader(GL_VERTEX_SHADER, vertexShaderSource.data())};
 
     GLuint fragmentShader{
         compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource.data())};
 
-    GLuint shaderProgram{glCreateProgram()};
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
+    shaderProgram_ = glCreateProgram();
+    glAttachShader(shaderProgram_, vertexShader);
+    glAttachShader(shaderProgram_, fragmentShader);
+    glLinkProgram(shaderProgram_);
 
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
-
-    return shaderProgram;
   }
 
   GLuint compileShader(GLenum type, const char *source) const {
@@ -252,17 +308,17 @@ private:
 
   GLuint vertexArray_{0};
   GLuint vertexBuffer_{0};
-  GLuint elementBuffer_{0};
+
   GLuint shaderProgram_{0};
-  GLint uniformViewportLocation{0};
-  GLint uniformModelLocation{0};
+  GLint uniformViewportLocation_{0};
+  GLint uniformColorLocation_{0};
 };
 
 template <typename TNumber> class StepSorting {
 public:
-  virtual ~StepSorting() = default;
-
   virtual void step() = 0;
+
+  virtual ~StepSorting() = default;
 
   void setData(const std::vector<TNumber> &data) {
     data_ = data;
@@ -276,21 +332,23 @@ public:
 
   bool wasSwap() const { return wasSwap_; }
 
+  glm::uvec2 getSwappedIndices() const { return swappedIndices_; }
+
   bool isDone() const { return isDone_; }
 
 protected:
   virtual void reset() = 0;
 
   std::vector<TNumber> data_;
-  bool isDone_{false};
   size_t N_{0};
   bool wasSwap_{false};
+  glm::uvec2 swappedIndices_{0, 0};
+  bool isDone_{false};
 };
 
 template <typename TNumber> class BubbleSort : public StepSorting<TNumber> {
 public:
   void step() override {
-
     this->wasSwap_ = false;
 
     if (this->isDone_ || this->N_ == 0)
@@ -301,6 +359,7 @@ public:
         if (this->data_[j_ + 1] < this->data_[j_]) {
           std::swap(this->data_[j_ + 1], this->data_[j_]);
           this->wasSwap_ = true;
+          this->swappedIndices_ = {j_ + 1, j_};
           j_++;
           return;
         }
@@ -336,13 +395,13 @@ public:
       if (j_ > 0 && this->data_[j_] < this->data_[j_ - 1]) {
         std::swap(this->data_[j_], this->data_[j_ - 1]);
         this->wasSwap_ = true;
+        this->swappedIndices_ = {j_, j_ - 1};
         j_--;
         return;
       } else {
         i_++;
         j_ = i_;
       }
-
     } else {
       this->isDone_ = true;
     }
@@ -361,7 +420,6 @@ private:
 template <typename TNumber> class SelectionSort : public StepSorting<TNumber> {
 public:
   void step() override {
-
     this->wasSwap_ = false;
 
     if (this->isDone_ || this->N_ == 0)
@@ -376,6 +434,7 @@ public:
         if (minIndex_ != i_) {
           std::swap(this->data_[i_], this->data_[minIndex_]);
           this->wasSwap_ = true;
+          this->swappedIndices_ = {i_, minIndex_};
         }
         i_++;
         minIndex_ = j_ = i_;
@@ -403,7 +462,7 @@ private:
 template <typename TNumber> class SortingVisualizer {
 public:
   SortingVisualizer() {
-    data_.resize(s_elementCount);
+    data_.resize(kElementCount);
     std::iota(data_.begin(), data_.end(), 1);
 
     std::mt19937 generator{std::random_device{}()};
@@ -414,79 +473,175 @@ public:
   SortingVisualizer &operator=(const SortingVisualizer &) = delete;
 
   void update(uint64_t dt) {
-
-    if (!sortAlgorithm_ || sortAlgorithm_->isDone()) {
+    if (!sortAlgorithm_ || sortAlgorithm_->isDone())
       return;
-    }
 
-    accumulator_ += dt;
-    if (accumulator_ < interval_) {
+    passedTime_ += dt;
+    if (passedTime_ < kInterval)
       return;
-    }
-    accumulator_ = 0;
+
+    passedTime_ = 0;
+    sortingState_ = {};
 
     while (!sortAlgorithm_->isDone()) {
       sortAlgorithm_->step();
-      if (sortAlgorithm_->wasSwap())
-        break;
+      if (sortAlgorithm_->wasSwap()) {
+        sortingState_.wasSwap = true;
+        sortingState_.swappedIndices = sortAlgorithm_->getSwappedIndices();
+        return;
+      }
     }
+
+    sortingState_.isDone = true;
   }
 
-  const std::vector<TNumber> &getActualData() const {
-    if (!sortAlgorithm_) {
-      static const std::vector<TNumber> empty;
-      return empty;
-    }
+  const std::vector<TNumber> &getData() const {
+    if (!sortAlgorithm_)
+      return data_;
 
     return sortAlgorithm_->getData();
   }
-  const std::vector<int> &getBeginData() const { return data_; }
 
   template <typename TAlgorithm> void selectSortAlgorithm() {
     sortAlgorithm_ = std::make_unique<TAlgorithm>();
-    sortAlgorithm_->setData(data_);
+    reset();
   }
 
   void resetSortData() {
     if (!sortAlgorithm_)
       return;
-
-    sortAlgorithm_->setData(data_);
+    reset();
   }
 
-  bool isSorted() const {
-    if (!sortAlgorithm_)
+  const SortingState &getSortingState() const { return sortingState_; }
+
+  bool oneFrameAfterSortingDone() {
+    if (usedFrameAfterSortingDone_)
       return false;
 
-    return sortAlgorithm_->isDone();
+    if (sortingState_.isDone) {
+      usedFrameAfterSortingDone_ = true;
+      endSortingTime_ = SDL_GetTicks();
+      return true;
+    }
+
+    return false;
+  }
+
+  size_t getSortingTime() const { return endSortingTime_ - beginSortingTime_; }
+
+private:
+  void reset() {
+    sortingState_ = {};
+    passedTime_ = 0;
+    usedFrameAfterSortingDone_ = false;
+    sortAlgorithm_->setData(data_);
+    beginSortingTime_ = SDL_GetTicks();
+  }
+
+  std::unique_ptr<StepSorting<TNumber>> sortAlgorithm_;
+  std::vector<TNumber> data_{};
+  uint64_t passedTime_{0};
+  SortingState sortingState_{};
+  bool usedFrameAfterSortingDone_{false};
+  size_t beginSortingTime_{0};
+  size_t endSortingTime_{0};
+
+  static constexpr uint64_t kInterval{50};
+  static constexpr size_t kElementCount{30};
+};
+
+class Controller {
+public:
+  void processInput(const SDL_Event &event) {
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN: {
+      keys_[event.key.key] = true;
+      break;
+    }
+
+    case SDL_EVENT_KEY_UP: {
+      keys_[event.key.key] = false;
+      break;
+    }
+    }
+  }
+
+  bool isKeyPressed(SDL_Keycode key) const {
+    auto it{keys_.find(key)};
+    if (it != keys_.end())
+      return it->second;
+    return false;
   }
 
 private:
-  std::unique_ptr<StepSorting<TNumber>> sortAlgorithm_;
-  std::vector<TNumber> data_{};
-  uint64_t accumulator_{0};
-  uint64_t interval_{0};
-  inline static constexpr size_t s_elementCount{300};
+  std::unordered_map<SDL_Keycode, bool> keys_;
+};
+
+class SortingVisualizerManager {
+public:
+  template <typename TNumber>
+  void update(SortingVisualizer<TNumber> &sortingVisualizer,
+              const Controller &controller) {
+
+    if (controller.isKeyPressed(SDLK_1)) {
+      isKey1Down_ = true;
+    } else if (!controller.isKeyPressed(SDLK_1) && isKey1Down_) {
+      isKey1Down_ = false;
+      sortingVisualizer.template selectSortAlgorithm<BubbleSort<TNumber>>();
+      SDL_Log("Selected bubble sort");
+    }
+
+    if (controller.isKeyPressed(SDLK_2)) {
+      isKey2Down_ = true;
+    } else if (!controller.isKeyPressed(SDLK_2) && isKey2Down_) {
+      isKey2Down_ = false;
+      sortingVisualizer.template selectSortAlgorithm<InsertionSort<TNumber>>();
+      SDL_Log("Selected insertion sort");
+    }
+
+    if (controller.isKeyPressed(SDLK_3)) {
+      isKey3Down_ = true;
+    } else if (!controller.isKeyPressed(SDLK_3) && isKey3Down_) {
+      isKey3Down_ = false;
+      sortingVisualizer.template selectSortAlgorithm<SelectionSort<TNumber>>();
+      SDL_Log("Selected selection sort");
+    }
+
+    if (controller.isKeyPressed(SDLK_SPACE)) {
+      isSpaceDown_ = true;
+    } else if (!controller.isKeyPressed(SDLK_SPACE) && isSpaceDown_) {
+      isSpaceDown_ = false;
+      sortingVisualizer.resetSortData();
+      SDL_Log("Reset sort data");
+    }
+  }
+
+private:
+  bool isKey1Down_{false};
+  bool isKey2Down_{false};
+  bool isKey3Down_{false};
+  bool isSpaceDown_{false};
 };
 
 int main(int argc, char *argv[]) {
-
   using Number = int;
 
   try {
     ScreenWindow screenWindow;
     VisualizerRenderer visualizerRenderer;
     SortingVisualizer<Number> sortingVisualizer;
+    SortingVisualizerManager sortingVisualizerManager;
+    Controller controller;
 
     sortingVisualizer.selectSortAlgorithm<BubbleSort<Number>>();
 
     uint64_t lastTime{SDL_GetTicks()};
-    uint64_t beginSortTime{SDL_GetTicks()};
 
+    bool isDirty{true};
     glClearColor(0, 0, 0, 1);
-    while (!screenWindow.shouldClose()) {
-      glClear(GL_COLOR_BUFFER_BIT);
 
+    while (!screenWindow.shouldClose()) {
       uint64_t currentTime{SDL_GetTicks()};
       uint64_t dt{currentTime - lastTime};
       lastTime = currentTime;
@@ -499,25 +654,34 @@ int main(int argc, char *argv[]) {
 
         if (event.type == SDL_EVENT_WINDOW_RESIZED) {
           screenWindow.setSize({event.window.data1, event.window.data2});
+          isDirty = true;
         }
+
+        controller.processInput(event);
       }
+
+      sortingVisualizerManager.update(sortingVisualizer, controller);
 
       sortingVisualizer.update(dt);
+      const auto &sortingState{sortingVisualizer.getSortingState()};
+      isDirty = isDirty || sortingState.wasSwap;
 
-      if (sortingVisualizer.isSorted()) {
-        static bool first{true};
-        if (first) {
-          float sortTime{static_cast<float>(SDL_GetTicks() - beginSortTime) /
-                         1000.f};
-          SDL_Log("sort time: %.02fs", sortTime);
-          first = false;
-        }
+      if (sortingVisualizer.oneFrameAfterSortingDone()) {
+        isDirty = true;
+        SDL_Log("Sorting time: %.02fs",
+                static_cast<float>(sortingVisualizer.getSortingTime()) /
+                    1000.f);
       }
 
-      visualizerRenderer.renderDiagram(sortingVisualizer.getActualData(),
-                                       screenWindow.size());
+      if (isDirty) {
+        isDirty = false;
+        glClear(GL_COLOR_BUFFER_BIT);
 
-      SDL_GL_SwapWindow(screenWindow.getWindow());
+        visualizerRenderer.renderDiagram(sortingVisualizer.getData(),
+                                         screenWindow.size(), sortingState);
+
+        SDL_GL_SwapWindow(screenWindow.getWindow());
+      }
     }
 
   } catch (const std::exception &e) {
