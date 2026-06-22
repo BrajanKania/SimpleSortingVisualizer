@@ -5,6 +5,7 @@
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_oldnames.h>
+#include <SDL3/SDL_surface.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include <algorithm>
@@ -115,10 +116,15 @@ std::string_view vertexShaderSource{R"GLSL(
   #version 460 core
 
   layout (location=0) in vec2 aPosition;
+  layout (location=1) in float aColorFlag;
+
+  out float colorFlag;
 
   uniform vec2 uViewport;
-  
+
   void main(){
+    colorFlag = aColorFlag;
+
     vec2 normalizedPosition = aPosition / uViewport;
     vec2 clipPosition = vec2(
       normalizedPosition.x * 2.0 - 1.0,
@@ -132,11 +138,19 @@ std::string_view vertexShaderSource{R"GLSL(
 std::string_view fragmentShaderSource{R"GLSL(
   #version 460 core
 
+  in float colorFlag;
+
   out vec4 fragColor;
-  uniform vec3 uColor;
 
   void main(){
-    fragColor = vec4(uColor, 1);
+    vec3 color = vec3(1);
+    
+    if(colorFlag > 1.5)
+      color = vec3(1, 0, 0);
+    else if(colorFlag > 0.5)
+      color = vec3(0, 1, 0);
+
+    fragColor = vec4(color, 1);
   }
 
 )GLSL"};
@@ -156,9 +170,13 @@ public:
     glBindVertexArray(vertexArray_);
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
 
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2),
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec3),
                           (void *)0);
     glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, sizeof(glm::vec3),
+                          (void *)(sizeof(glm::vec2)));
+    glEnableVertexAttribArray(1);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -167,7 +185,6 @@ public:
 
     uniformViewportLocation_ =
         glGetUniformLocation(shaderProgram_, "uViewport");
-    uniformColorLocation_ = glGetUniformLocation(shaderProgram_, "uColor");
   }
 
   ~VisualizerRenderer() {
@@ -192,8 +209,7 @@ public:
       return;
 
     const size_t N{data.size()};
-
-    std::vector<glm::vec2> vertexData(N * 6);
+    vertexData_.resize(N * 6);
 
     const float barWidth{windowSize.x / static_cast<float>(N)};
     const TNumber maxValue{*std::max_element(data.begin(), data.end())};
@@ -214,67 +230,36 @@ public:
       const float bottom{static_cast<float>(windowSize.y)};
       const float y{bottom - barHeight};
 
+      float colorFlag{0};
+      if (sortingState.isDone) {
+        colorFlag = 1;
+      } else if (sortingState.wasSwap) {
+        if (i == sortingState.swappedIndices.x ||
+            i == sortingState.swappedIndices.y)
+          colorFlag = 2;
+      }
+
       const size_t baseIndex{i * 6};
-      vertexData[baseIndex] = glm::vec2(x, bottom);
-      vertexData[baseIndex + 1] = glm::vec2(x + barWidth, bottom);
-      vertexData[baseIndex + 2] = glm::vec2(x + barWidth, y);
+      vertexData_[baseIndex] = glm::vec3(x, bottom, colorFlag);
+      vertexData_[baseIndex + 1] = glm::vec3(x + barWidth, bottom, colorFlag);
+      vertexData_[baseIndex + 2] = glm::vec3(x + barWidth, y, colorFlag);
 
-      vertexData[baseIndex + 3] = glm::vec2(x, bottom);
-      vertexData[baseIndex + 4] = glm::vec2(x + barWidth, y);
-      vertexData[baseIndex + 5] = glm::vec2(x, y);
+      vertexData_[baseIndex + 3] = glm::vec3(x, bottom, colorFlag);
+      vertexData_[baseIndex + 4] = glm::vec3(x + barWidth, y, colorFlag);
+      vertexData_[baseIndex + 5] = glm::vec3(x, y, colorFlag);
     }
-
-    glm::vec3 color(1);
-    if (sortingState.isDone)
-      color = {0, 1, 0};
 
     glUseProgram(shaderProgram_);
     glUniform2f(uniformViewportLocation_, static_cast<float>(windowSize.x),
                 static_cast<float>(windowSize.y));
 
-    glUniform3f(uniformColorLocation_, color.r, color.g, color.b);
-
     glBindVertexArray(vertexArray_);
     glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
 
-    glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(glm::vec2),
-                 vertexData.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, vertexData_.size() * sizeof(glm::vec3),
+                 vertexData_.data(), GL_DYNAMIC_DRAW);
 
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertexData.size()));
-
-    if (sortingState.wasSwap) {
-      const float bottom{static_cast<float>(windowSize.y)};
-      float x{sortingState.swappedIndices.x * barWidth};
-      float barHeight{data[sortingState.swappedIndices.y] * scale};
-      float y{bottom - barHeight};
-
-      vertexData[0] = glm::vec2(x, bottom);
-      vertexData[1] = glm::vec2(x + barWidth, bottom);
-      vertexData[2] = glm::vec2(x + barWidth, y);
-
-      vertexData[3] = glm::vec2(x, bottom);
-      vertexData[4] = glm::vec2(x + barWidth, y);
-      vertexData[5] = glm::vec2(x, y);
-
-      x = sortingState.swappedIndices.y * barWidth;
-      barHeight = data[sortingState.swappedIndices.x] * scale;
-      y = bottom - barHeight;
-
-      vertexData[6] = glm::vec2(x, bottom);
-      vertexData[7] = glm::vec2(x + barWidth, bottom);
-      vertexData[8] = glm::vec2(x + barWidth, y);
-
-      vertexData[9] = glm::vec2(x, bottom);
-      vertexData[10] = glm::vec2(x + barWidth, y);
-      vertexData[11] = glm::vec2(x, y);
-
-      color = {1, 0, 0};
-      glUniform3f(uniformColorLocation_, color.r, color.g, color.b);
-
-      glBufferData(GL_ARRAY_BUFFER, 12 * sizeof(glm::vec2), vertexData.data(),
-                   GL_DYNAMIC_DRAW);
-      glDrawArrays(GL_TRIANGLES, 0, 12);
-    }
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(vertexData_.size()));
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -306,12 +291,12 @@ private:
     return shader;
   }
 
+  std::vector<glm::vec3> vertexData_;
   GLuint vertexArray_{0};
   GLuint vertexBuffer_{0};
 
   GLuint shaderProgram_{0};
   GLint uniformViewportLocation_{0};
-  GLint uniformColorLocation_{0};
 };
 
 template <typename TNumber> class StepSorting {
@@ -658,6 +643,8 @@ int main(int argc, char *argv[]) {
         }
 
         controller.processInput(event);
+        if (controller.isKeyPressed(SDLK_ESCAPE))
+          screenWindow.close();
       }
 
       sortingVisualizerManager.update(sortingVisualizer, controller);
