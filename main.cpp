@@ -209,7 +209,8 @@ public:
       return;
 
     const size_t N{data.size()};
-    vertexData_.resize(N * 6);
+    if (vertexData_.size() != N)
+      vertexData_.resize(N * 6);
 
     const float barWidth{windowSize.x / static_cast<float>(N)};
     const TNumber maxValue{*std::max_element(data.begin(), data.end())};
@@ -444,6 +445,99 @@ private:
   size_t minIndex_{0};
 };
 
+template <typename TNumber> class ShellSort : public StepSorting<TNumber> {
+public:
+  void step() override {
+    this->wasSwap_ = false;
+
+    if (this->isDone_ || this->N_ == 0)
+      return;
+
+    if (gap_ > 0) {
+      if (i_ < this->N_) {
+        if (j_ >= gap_ && this->data_[j_] < this->data_[j_ - gap_]) {
+          std::swap(this->data_[j_], this->data_[j_ - gap_]);
+          this->wasSwap_ = true;
+          this->swappedIndices_ = {j_, j_ - gap_};
+          j_ -= gap_;
+        } else {
+          i_++;
+          j_ = i_;
+        }
+      } else {
+        gap_ /= 2;
+        i_ = j_ = gap_;
+      }
+    } else {
+      this->isDone_ = true;
+    }
+  }
+
+private:
+  void reset() override {
+    gap_ = this->N_ / 2;
+    i_ = j_ = gap_;
+  }
+
+  size_t i_{0};
+  size_t j_{0};
+  size_t gap_{0};
+};
+
+template <typename TNumber> class CocktailSort : public StepSorting<TNumber> {
+public:
+  void step() override {
+    this->wasSwap_ = false;
+
+    if (this->isDone_ || this->N_ == 0)
+      return;
+
+    if (begin_ < end_ - 1) {
+      if (forward_) {
+        if (i_ < end_ - 1) {
+          if (this->data_[i_] > this->data_[i_ + 1]) {
+            std::swap(this->data_[i_], this->data_[i_ + 1]);
+            this->wasSwap_ = true;
+            this->swappedIndices_ = {i_, i_ + 1};
+          }
+          i_++;
+        } else {
+          end_--;
+          i_ = end_ - 1;
+          forward_ = false;
+        }
+      } else {
+        if (i_ > begin_) {
+          if (this->data_[i_] < this->data_[i_ - 1]) {
+            std::swap(this->data_[i_], this->data_[i_ - 1]);
+            this->wasSwap_ = true;
+            this->swappedIndices_ = {i_, i_ - 1};
+          }
+          i_--;
+        } else {
+          begin_++;
+          i_ = begin_;
+          forward_ = true;
+        }
+      }
+    } else {
+      this->isDone_ = true;
+    }
+  }
+
+private:
+  void reset() override {
+    i_ = begin_ = 0;
+    end_ = this->N_;
+    forward_ = true;
+  }
+
+  size_t i_{0};
+  size_t begin_{0};
+  size_t end_{0};
+  bool forward_{true};
+};
+
 template <typename TNumber> class SortingVisualizer {
 public:
   SortingVisualizer() {
@@ -533,7 +627,7 @@ private:
   size_t endSortingTime_{0};
 
   static constexpr uint64_t kInterval{50};
-  static constexpr size_t kElementCount{30};
+  static constexpr size_t kElementCount{50};
 };
 
 class Controller {
@@ -593,6 +687,22 @@ public:
       SDL_Log("Selected selection sort");
     }
 
+    if (controller.isKeyPressed(SDLK_4)) {
+      isKey4Down_ = true;
+    } else if (!controller.isKeyPressed(SDLK_4) && isKey4Down_) {
+      isKey4Down_ = false;
+      sortingVisualizer.template selectSortAlgorithm<ShellSort<TNumber>>();
+      SDL_Log("Selected shell sort");
+    }
+
+    if (controller.isKeyPressed(SDLK_5)) {
+      isKey5Down_ = true;
+    } else if (!controller.isKeyPressed(SDLK_5) && isKey5Down_) {
+      isKey5Down_ = false;
+      sortingVisualizer.template selectSortAlgorithm<CocktailSort<TNumber>>();
+      SDL_Log("Selected cocktail sort");
+    }
+
     if (controller.isKeyPressed(SDLK_SPACE)) {
       isSpaceDown_ = true;
     } else if (!controller.isKeyPressed(SDLK_SPACE) && isSpaceDown_) {
@@ -606,6 +716,8 @@ private:
   bool isKey1Down_{false};
   bool isKey2Down_{false};
   bool isKey3Down_{false};
+  bool isKey4Down_{false};
+  bool isKey5Down_{false};
   bool isSpaceDown_{false};
 };
 
